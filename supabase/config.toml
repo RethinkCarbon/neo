@@ -1,0 +1,3 @@
+# Meta OAuth callback is a browser redirect from Meta (GET ?code=&state=) — no Supabase JWT on that request.
+[functions.meta-auth]
+verify_jwt = false
