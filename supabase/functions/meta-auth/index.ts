@@ -8,16 +8,61 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const FB_API_VERSION = "v21.0";
 
-/** Supabase / Deno may pass a path-only URL; Meta always sends full query string. */
-function getRequestUrl(req: Request): URL {
-  const raw = req.url;
+/**
+ * Meta redirects with GET ?code=&state=. Edge runtimes may set `req.url` to a path-only string
+ * (no origin); resolving with Host headers can drop the query. We resolve against SUPABASE_URL
+ * and fall back to parsing the raw `?...` substring.
+ */
+function getOAuthCallbackSearchParams(req: Request, supabaseUrl: string): URLSearchParams {
+  const origin = supabaseUrl.trim().replace(/\/+$/, "");
+  const raw = req.url ?? "";
+
+  const candidates: URLSearchParams[] = [];
+
   if (raw.startsWith("http://") || raw.startsWith("https://")) {
-    return new URL(raw);
+    try {
+      candidates.push(new URL(raw).searchParams);
+    } catch {
+      /* ignore */
+    }
   }
+
+  try {
+    candidates.push(new URL(raw, `${origin}/`).searchParams);
+  } catch {
+    /* ignore */
+  }
+
   const host = req.headers.get("host") ?? req.headers.get("x-forwarded-host") ?? "";
   const proto = req.headers.get("x-forwarded-proto") ?? "https";
-  if (!host) return new URL(raw, "https://placeholder.local");
-  return new URL(raw, `${proto}://${host}`);
+  if (host) {
+    try {
+      candidates.push(new URL(raw, `${proto}://${host}/`).searchParams);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const qIdx = raw.indexOf("?");
+  if (qIdx !== -1) {
+    const qs = raw.slice(qIdx + 1).split("#")[0] ?? "";
+    if (qs) candidates.push(new URLSearchParams(qs));
+  }
+
+  const pick = (name: string): string | null => {
+    for (const p of candidates) {
+      const v = p.get(name);
+      if (v != null && v.length > 0) return v;
+    }
+    return null;
+  };
+
+  const merged = new URLSearchParams();
+  for (const name of ["code", "state", "error", "error_description"] as const) {
+    const v = pick(name);
+    if (v !== null) merged.set(name, v);
+  }
+  return merged;
 }
 
 function metaOAuthRedirectUri(): string {
@@ -211,11 +256,11 @@ async function handleMetaAuth(req: Request): Promise<Response> {
 
   // --- GET: Meta redirects here with ?code=&state= ---
   if (req.method === "GET") {
-    const u = getRequestUrl(req);
-    const code = u.searchParams.get("code");
-    const state = u.searchParams.get("state");
-    const err = u.searchParams.get("error");
-    const errDesc = u.searchParams.get("error_description");
+    const params = getOAuthCallbackSearchParams(req, supabaseUrl);
+    const code = params.get("code");
+    const state = params.get("state");
+    const err = params.get("error");
+    const errDesc = params.get("error_description");
 
     if (err) {
       return Response.redirect(
